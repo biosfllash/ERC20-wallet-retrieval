@@ -1,0 +1,134 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+            arch: amd64
+          - os: macos-latest
+            goos: darwin
+            arch: amd64
+          - os: macos-latest
+            goos: darwin
+            arch: arm64
+          - os: ubuntu-latest
+            goos: linux
+            arch: amd64
+    steps:
+      - name: Install Dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev gcc g++
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Build Binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 1
+        run: |
+          VERSION=$(git describe --tags --always)
+          OUTPUT="wallet-$VERSION-${{ matrix.goos }}-${{ matrix.arch }}"
+          LDFLAGS="-X main.version=$VERSION"
+          case "${{ matrix.goos }}-${{ matrix.arch }}" in
+            windows-amd64)
+              OUTPUT="$OUTPUT.exe"
+              CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
+                go build -ldflags="$LDFLAGS -H=windowsgui" -v -o "$OUTPUT"
+              ;;
+            darwin-amd64 | darwin-arm64)
+              go build -ldflags="$LDFLAGS" -v -o "$OUTPUT"
+              ;;
+            linux-amd64)
+              CC=gcc CXX=g++ \
+                go build -ldflags="$LDFLAGS" -v -o "$OUTPUT"
+              ;;
+            *)
+              echo "Unknown GOOS/GOARCH: $GOOS/$GOARCH"
+              exit 1
+              ;;
+          esac
+          mkdir -p release
+          mv "$OUTPUT" release/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.arch }}
+          path: release/
+
+  checksums:
+    name: Generate Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: artifacts
+
+      - name: Create SHA256SUMS
+        run: |
+          cd artifacts
+          find . -type f -exec sha256sum {} \; > SHA256SUMS.txt
+
+      - name: Upload Checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: artifacts/SHA256SUMS.txt
+
+  release:
+    name: Create Release
+    needs: [build, checksums]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: binaries
+
+      - name: Download Checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: checksums
+          path: checksums
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            binaries/**
+            checksums/SHA256SUMS.txt
+          body: |
+            ## Verification
+
+            Check file integrity with:
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
